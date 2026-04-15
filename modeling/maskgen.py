@@ -644,7 +644,8 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
     def sample_tokens(self, bsz, clip_tokenizer, clip_encoder, num_iter=32,
                       cfg=3.0, cfg_schedule="linear", captions=[""],
                       aes_scores=6.0, temperature=1.0, progress=False,
-                      order_type="random", record_snapshots=False):
+                      order_type="random", record_snapshots=False,
+                      record_full_snapshots=False):
         """Sample token latents with configurable generation order.
 
         Args:
@@ -655,13 +656,19 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
                   embedding.
                 - "prompt_sim_rev": same but prioritize lower similarity first.
             record_snapshots: If True, return a list of intermediate token
-                snapshots (before unpatchify/unscale) at each step.
+                snapshots (committed tokens only) at each step.
+            record_full_snapshots: If True, return a list of "full prediction"
+                snapshots. At each step, ALL masked positions are sampled
+                via diffusion (not just mask_to_pred), so the snapshot shows
+                the model's complete prediction at that point. More expensive
+                than record_snapshots since it runs extra diffusion sampling.
 
         Returns:
             tokens: Final generated tokens after unpatchify and unscaling.
-            snapshots (only if record_snapshots=True): List of length num_iter,
-                each element is the token tensor at that step (after unpatchify
-                and unscaling), ready for decode_tokens.
+            snapshots (only if record_snapshots or record_full_snapshots):
+                List of length num_iter, each element is the token tensor
+                at that step (after unpatchify and unscaling), ready for
+                decode_tokens.
         """
         assert order_type in self.SUPPORTED_ORDER_TYPES, \
             f"Unknown order_type: {order_type}. Supported: {self.SUPPORTED_ORDER_TYPES}"
@@ -700,7 +707,8 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         if progress:
             indices = tqdm(indices)
 
-        snapshots = [] if record_snapshots else None
+        do_snapshots = record_snapshots or record_full_snapshots
+        snapshots = [] if do_snapshots else None
 
         # generate latents
         for step in indices:
@@ -772,8 +780,6 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
             else:
                 mask_to_pred_full = mask_to_pred
 
-            # sample token latents for this step
-            z = z[mask_to_pred_full.nonzero(as_tuple=True)]
             # cfg schedule follow Muse
             if cfg_schedule == "linear":
                 cfg_iter = 1 + (cfg - 1) * (self.seq_len - mask_len[0]) / self.seq_len
@@ -782,7 +788,9 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
             else:
                 raise NotImplementedError
 
-            sampled_token_latent = self.diffloss.sample(z, temperature, cfg_iter)
+            # sample token latents for this step
+            z_pred = z[mask_to_pred_full.nonzero(as_tuple=True)]
+            sampled_token_latent = self.diffloss.sample(z_pred, temperature, cfg_iter)
 
             if not cfg == 1.0:
                 sampled_token_latent, _ = sampled_token_latent.chunk(2, dim=0)  # Remove null class samples
@@ -790,8 +798,35 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
             cur_tokens[mask_to_pred.nonzero(as_tuple=True)] = sampled_token_latent
             tokens = cur_tokens.clone()
 
-            if record_snapshots:
-                snap = self.unpatchify(tokens.clone())
+            if do_snapshots:
+                if record_full_snapshots:
+                    # Save RNG state so the extra sampling doesn't affect
+                    # the main generation's random stream
+                    rng_state_cpu = torch.random.get_rng_state()
+                    rng_state_gpu = torch.cuda.get_rng_state()
+
+                    # Sample ALL remaining masked positions for a full prediction snapshot
+                    remaining_mask = mask.bool()  # positions still masked after this step
+                    if remaining_mask.any():
+                        if not cfg == 1.0:
+                            remaining_mask_full = torch.cat([remaining_mask, remaining_mask], dim=0)
+                        else:
+                            remaining_mask_full = remaining_mask
+                        z_remaining = z[remaining_mask_full.nonzero(as_tuple=True)]
+                        sampled_remaining = self.diffloss.sample(z_remaining, temperature, cfg_iter)
+                        if not cfg == 1.0:
+                            sampled_remaining, _ = sampled_remaining.chunk(2, dim=0)
+                        snap_tokens = tokens.clone()
+                        snap_tokens[remaining_mask.nonzero(as_tuple=True)] = sampled_remaining
+                    else:
+                        snap_tokens = tokens.clone()
+                    snap = self.unpatchify(snap_tokens)
+
+                    # Restore RNG state
+                    torch.random.set_rng_state(rng_state_cpu)
+                    torch.cuda.set_rng_state(rng_state_gpu)
+                else:
+                    snap = self.unpatchify(tokens.clone())
                 snap = snap / self.vae_scale_factor
                 snapshots.append(snap)
 
@@ -799,6 +834,6 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         tokens = self.unpatchify(tokens)
         tokens = tokens / self.vae_scale_factor
 
-        if record_snapshots:
+        if do_snapshots:
             return tokens, snapshots
         return tokens
