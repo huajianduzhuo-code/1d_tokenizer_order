@@ -27,23 +27,46 @@ from modeling.maskgen import MaskGen_KL
 # Each has clear compositional structure / spatial hierarchy / semantic focus
 # so that random vs similarity-based ordering should produce visibly different
 # generation trajectories.
+#
+# The first section contains hand-crafted prompts with rich semantics.
+# The second section contains representative prompts from GenEval benchmark
+# (6 types: single_object, two_object, counting, colors, color_attr, position).
 COMPARISON_PROMPTS = [
-    # Main subject vs background — does sim-order prioritize the subject?
-    "A golden retriever sitting in a field of sunflowers.",
-    # Spatial relationship — which object gets generated first?
-    "A cat sitting on top of a stack of books.",
-    # Counting + distinct objects — ordering of semantically similar items
-    "Three red apples and two green pears on a wooden table.",
-    # Foreground subject vs complex background
-    "A red umbrella on a rainy city street at night.",
-    # Unusual composition — tests semantic understanding
-    "An astronaut riding a horse on the surface of the moon.",
-    # Fine-grained detail + hierarchy — cake vs candles vs background
-    "A birthday cake with colorful candles on a kitchen counter.",
-    # Multiple interacting subjects — who comes first?
-    "A child feeding a deer in a snowy forest.",
+    # # ── Hand-crafted prompts ────────────────────────────────────────────
+    # # Main subject vs background — does sim-order prioritize the subject?
+    # "A golden retriever sitting in a field of sunflowers.",
+    # # Spatial relationship — which object gets generated first?
+    # "A cat sitting on top of a stack of books.",
+    # # Counting + distinct objects — ordering of semantically similar items
+    # "Three red apples and two green pears on a wooden table.",
+    # # Foreground subject vs complex background
+    # "A red umbrella on a rainy city street at night.",
+    # # Unusual composition — tests semantic understanding
+    # "An astronaut riding a horse on the surface of the moon.",
+    # # Fine-grained detail + hierarchy — cake vs candles vs background
+    # "A birthday cake with colorful candles on a kitchen counter.",
+    # # Multiple interacting subjects — who comes first?
+    # "A child feeding a deer in a snowy forest.",
 
-    "A maze pattern and its solution"
+    # ── GenEval benchmark prompts ───────────────────────────────────────
+    # single_object: baseline — single entity, no composition
+    "a photo of a bicycle",
+    "a photo of a dog",
+    # two_object: two semantically distinct objects — which gets generated first?
+    "a photo of a scissors and a bird",
+    "a photo of a surfboard and a suitcase",
+    # counting: multiple identical objects — ordering among similar items
+    "a photo of three sports balls",
+    "a photo of four vases",
+    # colors: single object with a color attribute — attribute binding
+    "a photo of a purple elephant",
+    "a photo of a pink car",
+    # color_attr: two objects each with a distinct color — tests color-object binding
+    "a photo of a yellow parking meter and a pink refrigerator",
+    "a photo of a red laptop and a brown car",
+    # position: spatial relationship between two objects — tests spatial reasoning
+    "a photo of a zebra left of an elephant",
+    "a photo of a vase above a fire hydrant",
 ]
 
 
