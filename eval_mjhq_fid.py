@@ -216,6 +216,121 @@ def compute_fid_score(real_dir, gen_dir):
     return score
 
 
+# -----------------------------------------------------------------
+# Multi-seed summary
+# -----------------------------------------------------------------
+def _parse_fid_result(path):
+    """Read a `fid_result.txt` and return its k=v dict (fid as float)."""
+    out = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            out[k.strip()] = v.strip()
+    if "fid" in out:
+        try:
+            out["fid"] = float(out["fid"])
+        except ValueError:
+            out["fid"] = None
+    if "seed" in out:
+        try:
+            out["seed"] = int(out["seed"])
+        except ValueError:
+            pass
+    return out
+
+
+def _mean_std(values):
+    vs = [v for v in values if v is not None]
+    if not vs:
+        return None, None
+    if len(vs) == 1:
+        return vs[0], 0.0
+    m = sum(vs) / len(vs)
+    var = sum((v - m) ** 2 for v in vs) / len(vs)
+    return m, var ** 0.5
+
+
+def run_summary(output_dir, suffix_filter=None):
+    """Walk output_dir for eval_<model>_<order>_<suffix>_seed<seed>/fid_result.txt
+    and report FID mean±std grouped by (model, order). suffix_filter restricts
+    to runs of a given size (default: only `30k` full runs)."""
+    import re as _re
+    pat = _re.compile(
+        r"^eval_(l|xl)_(random|prompt_sim|prompt_sim_rev)_([^_]+)_seed(\d+)$")
+
+    if not os.path.isdir(output_dir):
+        print(f"Output dir not found: {output_dir}")
+        return
+
+    # results[(model, order, suffix)] = list of (seed, fid)
+    results = {}
+    for name in sorted(os.listdir(output_dir)):
+        m = pat.match(name)
+        if not m:
+            continue
+        model, order, suffix, seed = m.group(1), m.group(2), m.group(3), int(m.group(4))
+        if suffix_filter and suffix != suffix_filter:
+            continue
+        result_path = os.path.join(output_dir, name, "fid_result.txt")
+        if not os.path.isfile(result_path):
+            continue
+        d = _parse_fid_result(result_path)
+        results.setdefault((model, order, suffix), []).append((seed, d.get("fid")))
+
+    if not results:
+        print(f"No fid_result.txt found under {output_dir}/eval_*_seed*/")
+        return
+
+    # Group keys: (suffix) -> rows for that subset size
+    by_suffix = {}
+    for (model, order, suffix), rows in results.items():
+        by_suffix.setdefault(suffix, []).append((model, order, rows))
+
+    # Paper reference (from eval_mjhq_fid.py print: paper_fid={"xl":6.53,"l":7.24})
+    paper_fid = {"xl": 6.53, "l": 7.24}
+
+    out_path = os.path.join(output_dir, "mjhq_fid_summary_table.txt")
+    out_lines = []
+
+    for suffix in sorted(by_suffix):
+        rows = by_suffix[suffix]
+        order_rank = {"random": 0, "prompt_sim": 1, "prompt_sim_rev": 2}
+        rows.sort(key=lambda r: (r[0], order_rank.get(r[1], 99)))
+
+        header_line = f"MJHQ-30K FID  ({suffix} subset)  — mean±std across seeds"
+        col_w = 30
+        cell_w = 14  # "8.43±0.12"
+        header = f"{'Model':<{col_w}} | {'seeds':<14} | {'FID (mean±std)':>{cell_w}} | {'paper':>6}"
+        sep = "-" * len(header)
+        out_lines += [
+            "=" * len(header),
+            header_line,
+            "=" * len(header),
+            header,
+            sep,
+        ]
+
+        for model, order, fid_rows in rows:
+            seeds = sorted({s for s, _ in fid_rows})
+            fids = [v for _, v in fid_rows]
+            m_, s_ = _mean_std(fids)
+            label = f"MaskGen-{model.upper()} ({order}, n={len(fids)})"
+            cell = f"{m_:>5.2f}±{s_:<5.2f}".rjust(cell_w) if m_ is not None else f"{'--':>{cell_w}}"
+            paper = f"{paper_fid.get(model, 0):>6.2f}" if order == "random" else f"{'--':>6}"
+            out_lines.append(f"{label:<{col_w}} | {str(seeds):<14} | {cell} | {paper}")
+        out_lines.append("=" * len(header))
+        out_lines.append("")
+
+    body = "\n".join(out_lines)
+    print(body)
+    with open(out_path, "w") as f:
+        f.write(body + "\n")
+    print(f"Table saved to {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -245,7 +360,16 @@ def main():
                         help="Skip generation, only compute FID from existing images")
     parser.add_argument("--gen-dir", type=str, default=None,
                         help="Path to pre-generated images (for --fid-only)")
+    parser.add_argument("--summary", action="store_true",
+                        help="Aggregate FID across seeds (mean±std) from existing runs and exit")
+    parser.add_argument("--summary-suffix", type=str, default=None,
+                        help="Restrict --summary to runs with this size suffix "
+                             "(e.g. '30k' or 'n1000'); default: all sizes")
     args = parser.parse_args()
+
+    if args.summary:
+        run_summary(args.output_dir, suffix_filter=args.summary_suffix)
+        return
 
     meta_path = os.path.join(args.mjhq_dir, "meta_data.json")
     mjhq_img_dir = args.mjhq_dir  # category dirs (animals/, art/, ...) are directly under this

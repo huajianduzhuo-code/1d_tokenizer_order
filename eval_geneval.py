@@ -31,6 +31,7 @@ os.environ["HF_HOME"] = "/data3/haoyuliu/huggingface_cache"
 import argparse
 import json
 import math
+import re
 import time
 import subprocess
 import sys
@@ -43,8 +44,7 @@ from PIL import Image
 from tqdm import tqdm
 import open_clip
 
-from modeling.tatitok import TATiTok
-from modeling.maskgen import MaskGen_KL
+_SUPPORTED_ORDER_TYPES = ["random", "prompt_sim", "prompt_sim_rev"]
 
 
 # -----------------------------------------------------------------
@@ -87,8 +87,8 @@ def load_geneval_metadata():
     return metadatas
 
 
-def run_dir_name(model, order):
-    return os.path.join(OUTPUT_BASE, f"maskgen_kl_{model}_{order}")
+def run_dir_name(model, order, seed):
+    return os.path.join(OUTPUT_BASE, f"maskgen_kl_{model}_{order}_seed{seed}")
 
 
 def worker_generate(rank, num_gpus, metadatas, out_dir, args):
@@ -131,6 +131,9 @@ def worker_generate(rank, num_gpus, metadatas, out_dir, args):
         return
 
     print(f"[GPU {rank}] Loading models...")
+
+    from modeling.tatitok import TATiTok
+    from modeling.maskgen import MaskGen_KL
 
     # Load models
     tatitok = TATiTok.from_pretrained("turkeyju/tokenizer_tatitok_bl32_vae")
@@ -214,11 +217,12 @@ def worker_generate(rank, num_gpus, metadatas, out_dir, args):
 def run_generation(args):
     """Generate images for all GenEval prompts."""
     metadatas = load_geneval_metadata()
-    out_dir = run_dir_name(args.model, args.order)
+    out_dir = run_dir_name(args.model, args.order, args.seed)
     os.makedirs(out_dir, exist_ok=True)
 
     print(f"Model: MaskGen-KL-{args.model.upper()}")
     print(f"Order: {args.order}")
+    print(f"Seed:  {args.seed}")
     print(f"Samples per prompt: {args.n_samples}")
     print(f"Total prompts: {len(metadatas)}")
     print(f"Output: {out_dir}")
@@ -249,7 +253,7 @@ def run_generation(args):
 
 def run_evaluation(args):
     """Run GenEval evaluation on generated images."""
-    out_dir = run_dir_name(args.model, args.order)
+    out_dir = run_dir_name(args.model, args.order, args.seed)
     results_file = os.path.join(out_dir, "results.jsonl")
 
     # Check Mask2Former weights
@@ -293,10 +297,10 @@ def run_evaluation(args):
     subprocess.run(cmd_summary, check=True)
 
     # Step 3: Parse and save structured results
-    _save_parsed_results(results_file, args.model, args.order)
+    _save_parsed_results(results_file, args.model, args.order, args.seed)
 
 
-def _save_parsed_results(results_file, model, order):
+def _save_parsed_results(results_file, model, order, seed):
     """Parse results.jsonl and save a structured summary (prompt-level).
 
     Prompt-level: a prompt is correct if ANY of its images is correct.
@@ -321,6 +325,7 @@ def _save_parsed_results(results_file, model, order):
     summary = {
         "model": f"maskgen_kl_{model}",
         "order": order,
+        "seed": seed,
         "overall": round(overall, 4),
         "tasks": {k: round(v, 4) for k, v in task_scores.items()},
         "total_images": len(df),
@@ -329,19 +334,41 @@ def _save_parsed_results(results_file, model, order):
     }
 
     summary_file = os.path.join(
-        run_dir_name(model, order), "geneval_summary.json")
+        run_dir_name(model, order, seed), "geneval_summary.json")
     with open(summary_file, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"\nStructured results saved to {summary_file}")
 
 
-def run_summary():
-    """Print a comparison table of all completed evaluations."""
-    print(f"\n{'='*80}")
-    print(f"GenEval Results Comparison")
-    print(f"{'='*80}")
+def _seeds_present():
+    """Find {(model, order): [seeds present]} on disk."""
+    pat = re.compile(r"^maskgen_kl_(l|xl)_(random|prompt_sim|prompt_sim_rev)_seed(\d+)$")
+    found = {}
+    if not os.path.isdir(OUTPUT_BASE):
+        return found
+    for name in os.listdir(OUTPUT_BASE):
+        m = pat.match(name)
+        if not m:
+            continue
+        found.setdefault((m.group(1), m.group(2)), []).append(int(m.group(3)))
+    for k in found:
+        found[k].sort()
+    return found
 
-    # Paper reference values (README MaskGen Model Zoo, prompt-level)
+
+def _mean_std(values):
+    vs = [v for v in values if v is not None]
+    if not vs:
+        return None, None
+    if len(vs) == 1:
+        return vs[0], 0.0
+    m = sum(vs) / len(vs)
+    var = sum((v - m) ** 2 for v in vs) / len(vs)
+    return m, var ** 0.5
+
+
+def run_summary():
+    """Print a comparison table of all completed evaluations (mean±std over seeds)."""
     paper_results = {
         ("l", "random"): {
             "single_object": 0.99, "two_object": 0.57, "counting": 0.36,
@@ -351,52 +378,85 @@ def run_summary():
         ("xl", "random"): {"overall": 0.55},
     }
 
-    # Collect all results
-    all_results = []
-    for model in ["l", "xl"]:
-        for order in ["random", "prompt_sim", "prompt_sim_rev"]:
+    seeds_map = _seeds_present()
+    all_results = {}
+    for (model, order), seeds in seeds_map.items():
+        seed_summaries = []
+        for seed in seeds:
             summary_file = os.path.join(
-                run_dir_name(model, order), "geneval_summary.json")
+                run_dir_name(model, order, seed), "geneval_summary.json")
             if os.path.exists(summary_file):
                 with open(summary_file) as f:
-                    result = json.load(f)
-                all_results.append((model, order, result))
+                    seed_summaries.append(json.load(f))
+        if seed_summaries:
+            all_results[(model, order)] = seed_summaries
 
     if not all_results:
         print("No evaluation results found yet.")
-        print(f"Expected location: {OUTPUT_BASE}/maskgen_kl_<model>_<order>/geneval_summary.json")
+        print(f"Expected location: {OUTPUT_BASE}/maskgen_kl_<model>_<order>_seed<seed>/geneval_summary.json")
         return
 
-    # Print table
     task_order = ["single_object", "two_object", "counting",
                   "colors", "position", "color_attr"]
     task_short = ["S.Obj", "T.Obj", "Count", "Colors", "Pos.", "C.Attr"]
-    header = f"{'Model':<28} | " + " | ".join(f"{t:>6}" for t in task_short) + " | Overall"
-    print(header)
-    print("-" * len(header))
+    cell_w = 13
 
-    # Print paper baselines first
+    def _fmt_ms(mean, std):
+        if mean is None:
+            return f"{'--':>{cell_w}}"
+        return f"{mean:>5.3f}±{std:<5.3f}".rjust(cell_w)
+
+    lines = []
+    lines.append("=" * 100)
+    lines.append("GenEval Results Comparison (mean±std across seeds)")
+    lines.append("=" * 100)
+
+    lines.append("Seeds discovered per (model, order):")
+    for (model, order), summaries in sorted(all_results.items()):
+        seeds = sorted(s.get("seed", "?") for s in summaries)
+        lines.append(f"  {model:>2} / {order:<14}: {seeds}")
+    lines.append("")
+
+    header = f"{'Model':<28} | " + " | ".join(f"{t:>{cell_w}}" for t in task_short) + f" | {'Overall':>{cell_w}}"
+    lines.append(header)
+    lines.append("-" * len(header))
+
     for (model, order), scores in paper_results.items():
         label = f"Paper MaskGen-{model.upper()} (KL)"
         row = f"{label:<28} | "
         row += " | ".join(
-            f"{scores[t]:>6.2f}" if t in scores else f"{'--':>6}"
+            _fmt_ms(scores[t], 0.0) if t in scores else f"{'--':>{cell_w}}"
             for t in task_order)
-        row += f" | {scores['overall']:>6.2f}"
-        print(row)
+        row += f" | {_fmt_ms(scores['overall'], 0.0)}"
+        lines.append(row)
 
-    print("-" * len(header))
+    lines.append("-" * len(header))
 
-    # Print our results
-    for model, order, result in all_results:
-        label = f"MaskGen-{model.upper()} ({order})"
+    order_rank = {"random": 0, "prompt_sim": 1, "prompt_sim_rev": 2}
+    for (model, order) in sorted(all_results, key=lambda k: (k[0], order_rank.get(k[1], 99))):
+        summaries = all_results[(model, order)]
+        n = len(summaries)
+        label = f"MaskGen-{model.upper()} ({order}, n={n})"
         row = f"{label:<28} | "
-        tasks = result.get("tasks", {})
-        row += " | ".join(f"{tasks.get(t, 0):>6.2f}" for t in task_order)
-        row += f" | {result['overall']:>6.2f}"
-        print(row)
+        for t in task_order:
+            vals = [s.get("tasks", {}).get(t) for s in summaries]
+            m, sd = _mean_std(vals)
+            row += _fmt_ms(m, sd) + " | "
+        ovs = [s.get("overall") for s in summaries]
+        m, sd = _mean_std(ovs)
+        row += _fmt_ms(m, sd)
+        lines.append(row)
 
-    print(f"{'='*80}")
+    lines.append("=" * 100)
+
+    body = "\n".join(lines)
+    print(body)
+
+    os.makedirs(OUTPUT_BASE, exist_ok=True)
+    out_file = os.path.join(OUTPUT_BASE, "geneval_summary_table.txt")
+    with open(out_file, "w") as f:
+        f.write(body + "\n")
+    print(f"\nTable saved to {out_file}")
 
 
 def main():
@@ -408,7 +468,7 @@ def main():
                         choices=["l", "xl"],
                         help="MaskGen-KL model size")
     parser.add_argument("--order", type=str, default="random",
-                        choices=MaskGen_KL.SUPPORTED_ORDER_TYPES,
+                        choices=_SUPPORTED_ORDER_TYPES,
                         help="Token generation order strategy")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-iter", type=int, default=32)
@@ -427,11 +487,23 @@ def main():
                         help="Skip generation, only run evaluation")
     parser.add_argument("--summary", action="store_true",
                         help="Print comparison table of all results")
+    parser.add_argument("--save-summary", action="store_true",
+                        help="Parse existing results.jsonl into geneval_summary.json "
+                             "(use after eval_geneval_parallel.py).")
 
     args = parser.parse_args()
 
     if args.summary:
         run_summary()
+        return
+
+    if args.save_summary:
+        out_dir = run_dir_name(args.model, args.order, args.seed)
+        results_file = os.path.join(out_dir, "results.jsonl")
+        if not os.path.exists(results_file):
+            print(f"results.jsonl not found at {results_file}")
+            sys.exit(1)
+        _save_parsed_results(results_file, args.model, args.order, args.seed)
         return
 
     if not args.eval_only:

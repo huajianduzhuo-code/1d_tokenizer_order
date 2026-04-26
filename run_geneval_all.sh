@@ -1,6 +1,7 @@
 #!/bin/bash
-# Run all 4 GenEval configurations in parallel (generation), then evaluate.
-# 8x A5000 → 2 GPUs per config, 4 configs in parallel.
+# Run all 4 GenEval configurations × multiple seeds (generation only).
+# 8x A5000 → 2 GPUs per config, 4 configs in parallel inside each seed.
+# Default seeds: 42 43 44 (override with $SEEDS).
 
 set -e
 
@@ -9,38 +10,38 @@ CONDA_BASE=$(conda info --base)
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate maskgen
 
-echo "============================================"
-echo " GenEval: Launching 4 configs in parallel"
-echo "============================================"
+SEEDS=${SEEDS:-"42 43 44"}
 
-# Generation: 4 configs x 2 GPUs each
-CUDA_VISIBLE_DEVICES=0,1 python eval_geneval.py --model l  --order random     --num-gpus 2 &
-PID1=$!
-CUDA_VISIBLE_DEVICES=2,3 python eval_geneval.py --model l  --order prompt_sim  --num-gpus 2 &
-PID2=$!
-CUDA_VISIBLE_DEVICES=4,5 python eval_geneval.py --model xl --order random      --num-gpus 2 &
-PID3=$!
-CUDA_VISIBLE_DEVICES=6,7 python eval_geneval.py --model xl --order prompt_sim   --num-gpus 2 &
-PID4=$!
+for SEED in $SEEDS; do
+    echo "============================================"
+    echo " GenEval: 4 configs in parallel  (seed=$SEED)"
+    echo "============================================"
 
-echo "PIDs: L-random=$PID1  L-prompt_sim=$PID2  XL-random=$PID3  XL-prompt_sim=$PID4"
-echo "Waiting for all generation jobs..."
+    CUDA_VISIBLE_DEVICES=0,1 python eval_geneval.py --model l  --order random     --num-gpus 2 --seed $SEED &
+    PID1=$!
+    CUDA_VISIBLE_DEVICES=2,3 python eval_geneval.py --model l  --order prompt_sim --num-gpus 2 --seed $SEED &
+    PID2=$!
+    CUDA_VISIBLE_DEVICES=4,5 python eval_geneval.py --model xl --order random     --num-gpus 2 --seed $SEED &
+    PID3=$!
+    CUDA_VISIBLE_DEVICES=6,7 python eval_geneval.py --model xl --order prompt_sim --num-gpus 2 --seed $SEED &
+    PID4=$!
 
-# Wait and report
-FAIL=0
-for PID in $PID1 $PID2 $PID3 $PID4; do
-    wait $PID || FAIL=$((FAIL+1))
+    echo "PIDs (seed=$SEED): L-random=$PID1  L-prompt_sim=$PID2  XL-random=$PID3  XL-prompt_sim=$PID4"
+
+    FAIL=0
+    for PID in $PID1 $PID2 $PID3 $PID4; do
+        wait $PID || FAIL=$((FAIL+1))
+    done
+
+    if [ $FAIL -ne 0 ]; then
+        echo "WARNING: $FAIL generation job(s) failed at seed=$SEED"
+    fi
 done
-
-if [ $FAIL -ne 0 ]; then
-    echo "WARNING: $FAIL generation job(s) failed"
-fi
 
 echo ""
 echo "============================================"
-echo " Generation complete!"
+echo " Generation complete (seeds: $SEEDS)"
 echo " Output: /data3/haoyuliu/geneval_eval/"
 echo "============================================"
 echo ""
-echo "Next: install mmdet for evaluation, then run:"
-echo "  bash run_geneval_evaluate.sh"
+echo "Next: bash run_geneval_evaluate.sh"

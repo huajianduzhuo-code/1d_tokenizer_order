@@ -108,12 +108,12 @@ def load_dpg_prompts():
     return prompts
 
 
-def run_dir_name(model, order):
-    return os.path.join(OUTPUT_BASE, f"maskgen_kl_{model}_{order}")
+def run_dir_name(model, order, seed):
+    return os.path.join(OUTPUT_BASE, f"maskgen_kl_{model}_{order}_seed{seed}")
 
 
-def images_dir_for(model, order):
-    return os.path.join(run_dir_name(model, order), "images")
+def images_dir_for(model, order, seed):
+    return os.path.join(run_dir_name(model, order, seed), "images")
 
 
 # -----------------------------------------------------------------
@@ -257,11 +257,12 @@ def run_generation(args):
     if args.num_samples:
         prompts = prompts[:args.num_samples]
 
-    out_dir = images_dir_for(args.model, args.order)
+    out_dir = images_dir_for(args.model, args.order, args.seed)
     os.makedirs(out_dir, exist_ok=True)
 
     print(f"Model: MaskGen-KL-{args.model.upper()}")
     print(f"Order: {args.order}")
+    print(f"Seed:  {args.seed}")
     print(f"Total prompts: {len(prompts)}  (samples/prompt: {N_SAMPLES_PER_PROMPT})")
     print(f"Output: {out_dir}")
 
@@ -286,8 +287,8 @@ def run_generation(args):
 # Evaluation (drives dist_eval.sh via subprocess + parses the output txt)
 # -----------------------------------------------------------------
 def run_evaluation(args):
-    out_dir = run_dir_name(args.model, args.order)
-    images_dir = images_dir_for(args.model, args.order)
+    out_dir = run_dir_name(args.model, args.order, args.seed)
+    images_dir = images_dir_for(args.model, args.order, args.seed)
 
     if not os.path.isdir(images_dir):
         print(f"Images dir not found: {images_dir}")
@@ -328,7 +329,7 @@ def run_evaluation(args):
     print(f"Running (cwd={DPG_ROOT}): {' '.join(cmd)}")
     subprocess.run(cmd, cwd=DPG_ROOT, env=env, check=True)
 
-    _parse_and_save_summary(images_dir, out_dir, args.model, args.order)
+    _parse_and_save_summary(images_dir, out_dir, args.model, args.order, args.seed)
 
 
 def _latest_results_txt(images_dir):
@@ -339,7 +340,7 @@ def _latest_results_txt(images_dir):
     return max(cands, key=os.path.getmtime)
 
 
-def _parse_and_save_summary(images_dir, out_dir, model, order):
+def _parse_and_save_summary(images_dir, out_dir, model, order, seed):
     """Parse the evaluator's results.txt into dpg_summary.json.
 
     Expected tail of the file:
@@ -388,6 +389,7 @@ def _parse_and_save_summary(images_dir, out_dir, model, order):
     summary = {
         "model": f"maskgen_kl_{model}",
         "order": order,
+        "seed": seed,
         "overall": overall,
         "l1_categories": l1,
         "l2_categories": l2,
@@ -449,9 +451,26 @@ def _load_category_counts():
     return l1_q, l2_q, l1_p, l2_p, total_q, len(all_prompts)
 
 
+def _mean_std(values):
+    """Return (mean, std) over a list of numbers, ignoring None entries.
+    std is population std (ddof=0). Returns (None, None) if no valid values."""
+    vs = [v for v in values if v is not None]
+    if not vs:
+        return None, None
+    if len(vs) == 1:
+        return vs[0], 0.0
+    m = sum(vs) / len(vs)
+    var = sum((v - m) ** 2 for v in vs) / len(vs)
+    return m, var ** 0.5
+
+
 def _format_category_table(level, results, q_counts, p_counts,
                            total_q, total_p, key):
-    """Render one table (L1 or L2). `key` is 'l1_categories' or 'l2_categories'."""
+    """Render one table (L1 or L2). `key` is 'l1_categories' or 'l2_categories'.
+
+    `results[model][order]` is a list of per-seed summary dicts. Cells are
+    rendered as `mean±std` over seeds; the Δ column is mean(prompt_sim) -
+    mean(random)."""
     models = [m for m in ["l", "xl"] if m in results]
     if not models:
         return ""
@@ -459,25 +478,34 @@ def _format_category_table(level, results, q_counts, p_counts,
     # Categories sorted by question count (descending) for easy readability.
     all_cats = set()
     for m in models:
-        for o_res in results[m].values():
-            all_cats.update((o_res.get(key) or {}).keys())
+        for seeds_list in results[m].values():
+            for s in seeds_list:
+                all_cats.update((s.get(key) or {}).keys())
     cats = sorted(all_cats, key=lambda c: (-q_counts.get(c, 0), c))
 
-    def _fmt_cell(rand, sim):
-        if rand is None and sim is None:
-            return f"{'--':>8} {'--':>8} {'--':>7}"
-        if rand is None:
-            return f"{'--':>8} {sim:>8.2f} {'--':>7}"
-        if sim is None:
-            return f"{rand:>8.2f} {'--':>8} {'--':>7}"
-        return f"{rand:>8.2f} {sim:>8.2f} {sim - rand:>+7.2f}"
+    def _collect(seeds_list, cat=None):
+        """Pull one scalar per seed (cat=None means 'overall')."""
+        if cat is None:
+            return [s.get("overall") for s in seeds_list]
+        return [(s.get(key) or {}).get(cat) for s in seeds_list]
 
-    # Header
+    def _fmt_ms(mean, std):
+        if mean is None:
+            return f"{'--':>13}"
+        return f"{mean:>6.2f}±{std:<5.2f}"
+
+    def _fmt_cell(rand_seeds, sim_seeds, cat=None):
+        rm, rs = _mean_std(_collect(rand_seeds, cat))
+        sm, ss = _mean_std(_collect(sim_seeds, cat))
+        delta = (sm - rm) if (rm is not None and sm is not None) else None
+        d_str = f"{delta:>+7.2f}" if delta is not None else f"{'--':>7}"
+        return f"{_fmt_ms(rm, rs)} {_fmt_ms(sm, ss)} {d_str}"
+
+    # Header — wider cells now to fit "mean±std" (13 chars each)
     col_w = 28
     header = f"{'Category':<{col_w}} | {'N_q':>5} | {'N_p':>5}"
     for m in models:
-        header += (f" | {m.upper() + '-rand':>8} {m.upper() + '-sim':>8} "
-                   f"{'Δ' + m.upper():>7}")
+        header += f" | {m.upper()+'-rand':>13} {m.upper()+'-sim':>13} {'Δ'+m.upper():>7}"
     sep = "-" * len(header)
 
     lines = [
@@ -493,42 +521,75 @@ def _format_category_table(level, results, q_counts, p_counts,
         np_ = p_counts.get(cat, 0)
         row = f"{cat:<{col_w}} | {nq:>5} | {np_:>5}"
         for m in models:
-            rand = (results[m].get("random") or {}).get(key, {}).get(cat)
-            sim = (results[m].get("prompt_sim") or {}).get(key, {}).get(cat)
-            row += " | " + _fmt_cell(rand, sim)
+            row += " | " + _fmt_cell(
+                results[m].get("random", []),
+                results[m].get("prompt_sim", []),
+                cat=cat)
         lines.append(row)
 
     # Overall row
     lines.append(sep)
     overall = f"{'Overall':<{col_w}} | {total_q:>5} | {total_p:>5}"
     for m in models:
-        rand = (results[m].get("random") or {}).get("overall")
-        sim = (results[m].get("prompt_sim") or {}).get("overall")
-        overall += " | " + _fmt_cell(rand, sim)
+        overall += " | " + _fmt_cell(
+            results[m].get("random", []),
+            results[m].get("prompt_sim", []),
+            cat=None)
     lines.append(overall)
     lines.append("=" * len(header))
 
     return "\n".join(lines)
 
 
+def _seeds_present():
+    """Inspect on-disk dirs to find {(model, order): [seeds...]} present."""
+    pat = re.compile(r"^maskgen_kl_(l|xl)_(random|prompt_sim|prompt_sim_rev)_seed(\d+)$")
+    found = {}
+    if not os.path.isdir(OUTPUT_BASE):
+        return found
+    for name in os.listdir(OUTPUT_BASE):
+        m = pat.match(name)
+        if not m:
+            continue
+        model, order, seed = m.group(1), m.group(2), int(m.group(3))
+        found.setdefault((model, order), []).append(seed)
+    for k in found:
+        found[k].sort()
+    return found
+
+
 def run_summary():
-    # Collect summaries grouped by model: results[model][order] = summary dict
+    # results[model][order] = list of per-seed summary dicts (sorted by seed)
     results = {}
+    seeds_map = _seeds_present()
     for model in ["l", "xl"]:
         model_res = {}
         for order in ["random", "prompt_sim", "prompt_sim_rev"]:
-            summary_file = os.path.join(
-                run_dir_name(model, order), "dpg_summary.json")
-            if os.path.exists(summary_file):
-                with open(summary_file) as f:
-                    model_res[order] = json.load(f)
+            seeds_list = []
+            for seed in seeds_map.get((model, order), []):
+                summary_file = os.path.join(
+                    run_dir_name(model, order, seed), "dpg_summary.json")
+                if os.path.exists(summary_file):
+                    with open(summary_file) as f:
+                        seeds_list.append(json.load(f))
+            if seeds_list:
+                model_res[order] = seeds_list
         if model_res:
             results[model] = model_res
 
     if not results:
         print("No evaluation results found yet.")
-        print(f"Expected: {OUTPUT_BASE}/maskgen_kl_<model>_<order>/dpg_summary.json")
+        print(f"Expected: {OUTPUT_BASE}/maskgen_kl_<model>_<order>_seed<seed>/dpg_summary.json")
         return
+
+    # Print which seeds we found
+    print("Seeds discovered per (model, order):")
+    for model in ["l", "xl"]:
+        for order in ["random", "prompt_sim", "prompt_sim_rev"]:
+            seeds = sorted(s.get("seed", "?") for s in results.get(model, {}).get(order, []))
+            if seeds:
+                print(f"  {model:>2} / {order:<14}: {seeds}")
+    print()
 
     l1_q, l2_q, l1_p, l2_p, total_q, total_p = _load_category_counts()
 

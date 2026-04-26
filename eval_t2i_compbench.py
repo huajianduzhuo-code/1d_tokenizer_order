@@ -136,16 +136,16 @@ def load_prompts(category):
     return prompts
 
 
-def run_dir(model, order):
-    return os.path.join(OUTPUT_BASE, f"maskgen_kl_{model}_{order}")
+def run_dir(model, order, seed):
+    return os.path.join(OUTPUT_BASE, f"maskgen_kl_{model}_{order}_seed{seed}")
 
 
-def category_dir(model, order, category):
-    return os.path.join(run_dir(model, order), category)
+def category_dir(model, order, category, seed):
+    return os.path.join(run_dir(model, order, seed), category)
 
 
-def samples_dir(model, order, category):
-    return os.path.join(category_dir(model, order, category), "samples")
+def samples_dir(model, order, category, seed):
+    return os.path.join(category_dir(model, order, category, seed), "samples")
 
 
 def image_filename(prompt, prompt_idx, sample_idx, samples_per_prompt):
@@ -289,11 +289,12 @@ def run_generation(args):
     torch, mp, *_ = _import_generation_stack()
 
     categories = _resolve_categories(args)
-    out_base = run_dir(args.model, args.order)
+    out_base = run_dir(args.model, args.order, args.seed)
     os.makedirs(out_base, exist_ok=True)
 
     print(f"Model: MaskGen-KL-{args.model.upper()}")
     print(f"Order: {args.order}")
+    print(f"Seed:  {args.seed}")
     print(f"Categories: {categories}")
     print(f"Samples/prompt: {args.samples_per_prompt}")
     print(f"Output base: {out_base}")
@@ -312,7 +313,7 @@ def run_generation(args):
         )
 
     for category in categories:
-        sdir = samples_dir(args.model, args.order, category)
+        sdir = samples_dir(args.model, args.order, category, args.seed)
         n = sum(1 for p in os.listdir(sdir) if p.endswith(".png")) if os.path.isdir(sdir) else 0
         n_prompts = len(load_prompts(category))
         if args.num_samples:
@@ -604,11 +605,11 @@ def _write_category_score(cat_dir, info):
     os.replace(tmp, path)
 
 
-def aggregate_config(model, order, samples_per_prompt=None):
+def aggregate_config(model, order, seed, samples_per_prompt=None):
     """Scan all <cat_dir>/score.json for a config and write the config-level
     t2i_compbench_summary.json. Idempotent, race-free vs per-category writes
     (atomic rename + reads disjoint files)."""
-    config_dir = run_dir(model, order)
+    config_dir = run_dir(model, order, seed)
     cats = {}
     for cat in CATEGORIES:
         p = os.path.join(config_dir, cat, "score.json")
@@ -619,6 +620,7 @@ def aggregate_config(model, order, samples_per_prompt=None):
     summary = {
         "model": f"maskgen_kl_{model}",
         "order": order,
+        "seed": seed,
         "samples_per_prompt": samples_per_prompt,
         "categories": cats,
         "overall_avg": sum(scored) / len(scored) if scored else None,
@@ -653,13 +655,13 @@ def run_evaluation(args):
     import torch  # for device_count default
     n_gpus = args.num_gpus or torch.cuda.device_count() or 1
     categories = _resolve_categories(args)
-    config_dir = run_dir(args.model, args.order)
+    config_dir = run_dir(args.model, args.order, args.seed)
     per_cat_summary = {}
 
-    print(f"Eval with {n_gpus} GPU(s) per category (image sharding).")
+    print(f"Eval with {n_gpus} GPU(s) per category (image sharding). Seed={args.seed}")
 
     for category in categories:
-        cat_dir = category_dir(args.model, args.order, category)
+        cat_dir = category_dir(args.model, args.order, category, args.seed)
         sdir = os.path.join(cat_dir, "samples")
         if not os.path.isdir(sdir):
             print(f"[{category}] samples/ not found: {sdir} — skip")
@@ -734,7 +736,8 @@ def run_evaluation(args):
 
     # Aggregate after each run. Idempotent: reads whatever score.json files
     # are on disk (including those written by prior invocations).
-    summary = aggregate_config(args.model, args.order, args.samples_per_prompt)
+    summary = aggregate_config(args.model, args.order, args.seed,
+                               args.samples_per_prompt)
     print(f"\nAggregate summary: {len(summary['categories'])} categories, "
           f"overall_avg={summary['overall_avg']}")
 
@@ -742,42 +745,92 @@ def run_evaluation(args):
 # -----------------------------------------------------------------
 # Cross-config summary table
 # -----------------------------------------------------------------
+def _seeds_present():
+    """Find {(model, order): [seeds...]} of finished t2i_compbench runs."""
+    pat = re.compile(r"^maskgen_kl_(l|xl)_(random|prompt_sim|prompt_sim_rev)_seed(\d+)$")
+    found = {}
+    if not os.path.isdir(OUTPUT_BASE):
+        return found
+    for name in os.listdir(OUTPUT_BASE):
+        m = pat.match(name)
+        if not m:
+            continue
+        found.setdefault((m.group(1), m.group(2)), []).append(int(m.group(3)))
+    for k in found:
+        found[k].sort()
+    return found
+
+
+def _mean_std(values):
+    vs = [v for v in values if v is not None]
+    if not vs:
+        return None, None
+    if len(vs) == 1:
+        return vs[0], 0.0
+    m = sum(vs) / len(vs)
+    var = sum((v - m) ** 2 for v in vs) / len(vs)
+    return m, var ** 0.5
+
+
 def run_summary():
+    """Aggregate t2i_compbench_summary.json across seeds; report mean±std."""
+    # results[model][order] = list of per-seed summary dicts
     results = {}
-    for model in ["l", "xl"]:
-        model_res = {}
-        for order in ["random", "prompt_sim", "prompt_sim_rev"]:
-            p = os.path.join(run_dir(model, order), "t2i_compbench_summary.json")
+    seeds_map = _seeds_present()
+    for (model, order), seeds in seeds_map.items():
+        seed_summaries = []
+        for seed in seeds:
+            p = os.path.join(run_dir(model, order, seed), "t2i_compbench_summary.json")
             if os.path.exists(p):
                 with open(p) as f:
-                    model_res[order] = json.load(f)
-        if model_res:
-            results[model] = model_res
+                    seed_summaries.append(json.load(f))
+        if seed_summaries:
+            results.setdefault(model, {})[order] = seed_summaries
 
     if not results:
         print("No evaluation results found yet.")
-        print(f"Expected: {OUTPUT_BASE}/maskgen_kl_<model>_<order>/t2i_compbench_summary.json")
+        print(f"Expected: {OUTPUT_BASE}/maskgen_kl_<model>_<order>_seed<seed>/t2i_compbench_summary.json")
         return
+
+    print("Seeds discovered per (model, order):")
+    for model in ["l", "xl"]:
+        for order in ["random", "prompt_sim", "prompt_sim_rev"]:
+            seeds = sorted(s.get("seed", "?") for s in results.get(model, {}).get(order, []))
+            if seeds:
+                print(f"  {model:>2} / {order:<14}: {seeds}")
+    print()
 
     models = [m for m in ["l", "xl"] if m in results]
     col_w = 14
+    cell_w = 13  # "0.000±0.000"
     header = f"{'Category':<{col_w}}"
     for m in models:
-        header += f" | {m.upper()+'-rand':>8} {m.upper()+'-sim':>8} {'Δ'+m.upper():>7}"
+        header += f" | {m.upper()+'-rand':>{cell_w}} {m.upper()+'-sim':>{cell_w}} {'Δ'+m.upper():>7}"
     sep = "-" * len(header)
 
-    def _cell(rand, sim):
-        if rand is None and sim is None:
-            return f"{'--':>8} {'--':>8} {'--':>7}"
-        if rand is None:
-            return f"{'--':>8} {sim:>8.4f} {'--':>7}"
-        if sim is None:
-            return f"{rand:>8.4f} {'--':>8} {'--':>7}"
-        return f"{rand:>8.4f} {sim:>8.4f} {sim - rand:>+7.4f}"
+    def _fmt_ms(mean, std):
+        if mean is None:
+            return f"{'--':>{cell_w}}"
+        return f"{mean:>5.3f}±{std:<5.3f}".rjust(cell_w)
+
+    def _per_cat_values(seeds_list, cat):
+        return [(s.get("categories") or {}).get(cat, {}).get("score") for s in seeds_list]
+
+    def _overall_values(seeds_list):
+        return [s.get("overall_avg") for s in seeds_list]
+
+    def _cell(rand_seeds, sim_seeds, cat=None):
+        rvals = _per_cat_values(rand_seeds, cat) if cat else _overall_values(rand_seeds)
+        svals = _per_cat_values(sim_seeds, cat) if cat else _overall_values(sim_seeds)
+        rm, rs = _mean_std(rvals)
+        sm, ss = _mean_std(svals)
+        delta = (sm - rm) if (rm is not None and sm is not None) else None
+        d_str = f"{delta:>+7.4f}" if delta is not None else f"{'--':>7}"
+        return f"{_fmt_ms(rm, rs)} {_fmt_ms(sm, ss)} {d_str}"
 
     lines = [
         "=" * len(header),
-        "T2I-CompBench++ Category Comparison (val set, 10 samples/prompt)",
+        "T2I-CompBench++ Category Comparison (mean±std across seeds)",
         "=" * len(header),
         header,
         sep,
@@ -785,17 +838,19 @@ def run_summary():
     for cat in CATEGORIES:
         row = f"{cat:<{col_w}}"
         for m in models:
-            rand = (results[m].get("random") or {}).get("categories", {}).get(cat, {}).get("score")
-            sim = (results[m].get("prompt_sim") or {}).get("categories", {}).get(cat, {}).get("score")
-            row += " | " + _cell(rand, sim)
+            row += " | " + _cell(
+                results[m].get("random", []),
+                results[m].get("prompt_sim", []),
+                cat=cat)
         lines.append(row)
 
     lines.append(sep)
     overall_row = f"{'Overall avg':<{col_w}}"
     for m in models:
-        rand = (results[m].get("random") or {}).get("overall_avg")
-        sim = (results[m].get("prompt_sim") or {}).get("overall_avg")
-        overall_row += " | " + _cell(rand, sim)
+        overall_row += " | " + _cell(
+            results[m].get("random", []),
+            results[m].get("prompt_sim", []),
+            cat=None)
     lines.append(overall_row)
     lines.append("=" * len(header))
 
@@ -858,9 +913,10 @@ def main():
         return
 
     if args.aggregate:
-        s = aggregate_config(args.model, args.order, args.samples_per_prompt)
+        s = aggregate_config(args.model, args.order, args.seed,
+                             args.samples_per_prompt)
         print(f"Aggregated {len(s['categories'])} categories for "
-              f"maskgen_kl_{args.model}/{args.order}: "
+              f"maskgen_kl_{args.model}/{args.order}/seed{args.seed}: "
               f"overall_avg={s['overall_avg']}")
         return
 
