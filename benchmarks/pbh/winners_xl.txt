@@ -1,0 +1,33 @@
+# PBH winners ranked by Δ_XL (prompt_sim − random on XL).
+# One prompt per line. Lines starting with # are ignored.
+# Used by run_maskgen_kl_visualize_full_predictions.py --compare --prompts-file ...
+
+# counting_hard
+Three lighthouses standing on a rocky coastline at dusk.
+Four windmills on a grassy hillside.
+Five oranges arranged in a small ceramic bowl.
+Four chess pieces lined up on a wooden table.
+Four candy canes hanging in a row from a decorated string.
+
+# count_x_color
+Four blue marbles and one green marble inside a clear glass jar.
+Five white horses and one brown horse in a grassy pasture.
+Three black cats and one orange cat sitting in front of a fireplace.
+Four red roses and one white rose in a long-stemmed bouquet.
+
+# composition_layout
+A child walking to the right of an adult down a quiet street.
+A bird perched on the top branch of a tree with a cat sitting under it.
+A teapot placed between two teacups on a wooden tray.
+A girl sitting to the left of a boy on a school bus seat.
+
+# color_binding_multi
+A yellow chair, a red book, and a blue mug arranged on a desk.
+A clown with a red nose, a green wig, and a yellow polka-dot suit.
+
+# relational_reasoning
+Two people of clearly different heights standing side by side.
+A small fish swimming below a much larger fish in the ocean.
+
+# negation_substitution
+A waiting room with chairs and magazines but no clock on the wall.

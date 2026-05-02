@@ -141,6 +141,9 @@ def main():
                         help="Order type for single-prompt mode")
     parser.add_argument("--compare", action="store_true",
                         help="Compare random vs prompt_sim for all built-in prompts")
+    parser.add_argument("--prompts-file", type=str, default=None,
+                        help="Path to a text file with one prompt per line; "
+                             "overrides COMPARISON_PROMPTS in --compare mode")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-iter", type=int, default=32)
     parser.add_argument("--cfg", type=float, default=3.0)
@@ -173,7 +176,11 @@ def main():
     os.makedirs(run_dir, exist_ok=True)
 
     if args.compare:
-        prompts = COMPARISON_PROMPTS
+        if args.prompts_file is not None:
+            with open(args.prompts_file) as f:
+                prompts = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        else:
+            prompts = COMPARISON_PROMPTS
         bsz = len(prompts)
         print(f"Comparison mode: {bsz} prompts x 2 orders (full predictions)")
 
