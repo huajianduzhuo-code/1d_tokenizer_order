@@ -20,6 +20,7 @@ from tqdm import tqdm
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from einops import rearrange
 import json
@@ -72,7 +73,7 @@ def open_clip_text_encoding(clip_tokenizer, clip_encoder, text):
 
     x = clip_encoder.ln_final(x)  # [batch_size, n_ctx, transformer.width]
 
-    pooled_embed, x = text_global_pool(x, idxs, clip_encoder.text_pool_type)
+    pooled_embed = text_global_pool(x, idxs, clip_encoder.text_pool_type)
     pooled_embed = pooled_embed @ clip_encoder.text_projection
     pooled_embed = pooled_embed.unsqueeze(1)
 
@@ -638,11 +639,47 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         return condition, condition_pooled
 
 
-    def sample_tokens(self, bsz, clip_tokenizer, clip_encoder, num_iter=32, cfg=3.0, cfg_schedule="linear", captions=[""], aes_scores=6.0, temperature=1.0, progress=False):
-        # init and sample generation orders
+    SUPPORTED_ORDER_TYPES = ["random", "prompt_sim", "prompt_sim_rev"]
+
+    def sample_tokens(self, bsz, clip_tokenizer, clip_encoder, num_iter=32,
+                      cfg=3.0, cfg_schedule="linear", captions=[""],
+                      aes_scores=6.0, temperature=1.0, progress=False,
+                      order_type="random", record_snapshots=False,
+                      record_full_snapshots=False):
+        """Sample token latents with configurable generation order.
+
+        Args:
+            order_type: Token generation order strategy.
+                - "random": pre-computed random order (original behavior).
+                - "prompt_sim": dynamic order, prioritize tokens whose decoder
+                  output has higher cosine similarity with the pooled text
+                  embedding.
+                - "prompt_sim_rev": same but prioritize lower similarity first.
+            record_snapshots: If True, return a list of intermediate token
+                snapshots (committed tokens only) at each step.
+            record_full_snapshots: If True, return a list of "full prediction"
+                snapshots. At each step, ALL masked positions are sampled
+                via diffusion (not just mask_to_pred), so the snapshot shows
+                the model's complete prediction at that point. More expensive
+                than record_snapshots since it runs extra diffusion sampling.
+
+        Returns:
+            tokens: Final generated tokens after unpatchify and unscaling.
+            snapshots (only if record_snapshots or record_full_snapshots):
+                List of length num_iter, each element is the token tensor
+                at that step (after unpatchify and unscaling), ready for
+                decode_tokens.
+        """
+        assert order_type in self.SUPPORTED_ORDER_TYPES, \
+            f"Unknown order_type: {order_type}. Supported: {self.SUPPORTED_ORDER_TYPES}"
+
+        # init
         mask = torch.ones(bsz, self.seq_len).cuda()
         tokens = torch.zeros(bsz, self.seq_len, self.token_embed_dim).cuda()
-        orders = self.sample_orders(bsz)
+
+        # pre-compute random orders (only used for order_type="random")
+        if order_type == "random":
+            orders = self.sample_orders(bsz)
 
         condition, condition_pooled = open_clip_text_encoding(clip_tokenizer, clip_encoder, captions)
 
@@ -663,25 +700,33 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         condition_pooled = self.text_pooled_emb(condition_pooled)
         fake_condition_pooled = self.text_pooled_emb(fake_condition_pooled)
 
+        # anchor for similarity-based orders: pooled text embedding in decoder space
+        sim_anchor = condition_pooled.squeeze(1)  # (bsz, decoder_embed_dim)
+
         indices = list(range(num_iter))
         if progress:
             indices = tqdm(indices)
+
+        do_snapshots = record_snapshots or record_full_snapshots
+        snapshots = [] if do_snapshots else None
 
         # generate latents
         for step in indices:
             cur_tokens = tokens.clone()
 
             if not cfg == 1.0:
-                tokens = torch.cat([tokens, tokens], dim=0)
+                tokens_fwd = torch.cat([tokens, tokens], dim=0)
                 cur_condition = torch.cat([condition, fake_condition], dim=0)
                 cur_condition_pooled = torch.cat([condition_pooled, fake_condition_pooled], dim=0)
-                mask = torch.cat([mask, mask], dim=0)
+                mask_fwd = torch.cat([mask, mask], dim=0)
             else:
+                tokens_fwd = tokens
                 cur_condition = condition
                 cur_condition_pooled = condition_pooled
+                mask_fwd = mask
 
             # mae decoder
-            z = self.forward_mae_decoder(tokens, mask, cur_condition, cur_condition_pooled)
+            z = self.forward_mae_decoder(tokens_fwd, mask_fwd, cur_condition, cur_condition_pooled)
 
             # mask ratio for the next round, following MaskGIT and MAGE.
             mask_ratio = np.cos(math.pi / 2. * (step + 1) / num_iter)
@@ -691,18 +736,50 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
             mask_len = torch.maximum(torch.Tensor([1]).cuda(),
                                      torch.minimum(torch.sum(mask, dim=-1, keepdims=True) - 1, mask_len))
 
-            # get masking for next iteration and locations to be predicted in this iteration
-            mask_next = mask_by_order(mask_len[0], orders, bsz, self.seq_len)
-            if step >= num_iter - 1:
-                mask_to_pred = mask[:bsz].bool()
-            else:
-                mask_to_pred = torch.logical_xor(mask[:bsz].bool(), mask_next.bool())
-            mask = mask_next
-            if not cfg == 1.0:
-                mask_to_pred = torch.cat([mask_to_pred, mask_to_pred], dim=0)
+            # determine which tokens to predict this step
+            if order_type == "random":
+                # original: use pre-computed random order
+                mask_next = mask_by_order(mask_len[0], orders, bsz, self.seq_len)
+                if step >= num_iter - 1:
+                    mask_to_pred = mask.bool()
+                else:
+                    mask_to_pred = torch.logical_xor(mask.bool(), mask_next.bool())
+                mask = mask_next
 
-            # sample token latents for this step
-            z = z[mask_to_pred.nonzero(as_tuple=True)]
+            elif order_type in ("prompt_sim", "prompt_sim_rev"):
+                # dynamic: cosine similarity between each token's decoder
+                # output and the pooled text embedding
+                z_cond = z[:bsz]  # (bsz, seq_len, decoder_embed_dim)
+                similarity = F.cosine_similarity(
+                    z_cond, sim_anchor.unsqueeze(1), dim=-1
+                )  # (bsz, seq_len)
+
+                if order_type == "prompt_sim_rev":
+                    similarity = -similarity
+
+                # mask out already-generated positions
+                current_mask = mask.bool()
+                similarity[~current_mask] = -float("inf")
+
+                num_to_keep = int(mask_len[0].long().item())
+                num_masked = int(current_mask[0].sum().item())
+                num_to_pred = max(1, num_masked - num_to_keep)
+
+                if step >= num_iter - 1:
+                    mask_to_pred = current_mask
+                else:
+                    _, topk_idx = similarity.topk(num_to_pred, dim=-1)
+                    mask_to_pred = torch.zeros_like(current_mask)
+                    mask_to_pred.scatter_(1, topk_idx, True)
+
+                mask = (current_mask & ~mask_to_pred).float()
+
+            # prepare mask_to_pred for cfg
+            if not cfg == 1.0:
+                mask_to_pred_full = torch.cat([mask_to_pred, mask_to_pred], dim=0)
+            else:
+                mask_to_pred_full = mask_to_pred
+
             # cfg schedule follow Muse
             if cfg_schedule == "linear":
                 cfg_iter = 1 + (cfg - 1) * (self.seq_len - mask_len[0]) / self.seq_len
@@ -710,17 +787,53 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
                 cfg_iter = cfg
             else:
                 raise NotImplementedError
-            
-            sampled_token_latent = self.diffloss.sample(z, temperature, cfg_iter)
-            
+
+            # sample token latents for this step
+            z_pred = z[mask_to_pred_full.nonzero(as_tuple=True)]
+            sampled_token_latent = self.diffloss.sample(z_pred, temperature, cfg_iter)
+
             if not cfg == 1.0:
                 sampled_token_latent, _ = sampled_token_latent.chunk(2, dim=0)  # Remove null class samples
-                mask_to_pred, _ = mask_to_pred.chunk(2, dim=0)
 
             cur_tokens[mask_to_pred.nonzero(as_tuple=True)] = sampled_token_latent
             tokens = cur_tokens.clone()
 
+            if do_snapshots:
+                if record_full_snapshots:
+                    # Save RNG state so the extra sampling doesn't affect
+                    # the main generation's random stream
+                    rng_state_cpu = torch.random.get_rng_state()
+                    rng_state_gpu = torch.cuda.get_rng_state()
+
+                    # Sample ALL remaining masked positions for a full prediction snapshot
+                    remaining_mask = mask.bool()  # positions still masked after this step
+                    if remaining_mask.any():
+                        if not cfg == 1.0:
+                            remaining_mask_full = torch.cat([remaining_mask, remaining_mask], dim=0)
+                        else:
+                            remaining_mask_full = remaining_mask
+                        z_remaining = z[remaining_mask_full.nonzero(as_tuple=True)]
+                        sampled_remaining = self.diffloss.sample(z_remaining, temperature, cfg_iter)
+                        if not cfg == 1.0:
+                            sampled_remaining, _ = sampled_remaining.chunk(2, dim=0)
+                        snap_tokens = tokens.clone()
+                        snap_tokens[remaining_mask.nonzero(as_tuple=True)] = sampled_remaining
+                    else:
+                        snap_tokens = tokens.clone()
+                    snap = self.unpatchify(snap_tokens)
+
+                    # Restore RNG state
+                    torch.random.set_rng_state(rng_state_cpu)
+                    torch.cuda.set_rng_state(rng_state_gpu)
+                else:
+                    snap = self.unpatchify(tokens.clone())
+                snap = snap / self.vae_scale_factor
+                snapshots.append(snap)
+
         # unpatchify
         tokens = self.unpatchify(tokens)
         tokens = tokens / self.vae_scale_factor
+
+        if do_snapshots:
+            return tokens, snapshots
         return tokens
