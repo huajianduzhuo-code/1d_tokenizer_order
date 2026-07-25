@@ -12,14 +12,19 @@ source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate /data3/haoyuliu/conda_envs/dpg
 
 SEEDS=${SEEDS:-"42 43 44"}
+ORDERS=${ORDERS:-"random prompt_sim prompt_sim_rev left_to_right right_to_left center_out"}
+MODELS=${MODELS:-"l xl"}
 
 echo "============================================"
-echo " DPG-Bench: sequential evaluation (seeds: $SEEDS)"
+echo " DPG-Bench: sequential evaluation"
+echo "   seeds:  $SEEDS"
+echo "   models: $MODELS"
+echo "   orders: $ORDERS"
 echo "============================================"
 
 for SEED in $SEEDS; do
-    for ORDER in random prompt_sim; do
-        for MODEL in l xl; do
+    for ORDER in $ORDERS; do
+        for MODEL in $MODELS; do
             SUMMARY=/data3/haoyuliu/dpg_bench_eval/maskgen_kl_${MODEL}_${ORDER}_seed${SEED}/dpg_summary.json
             if [ -f "$SUMMARY" ]; then
                 echo "Skipping $MODEL / $ORDER / seed=$SEED (summary exists)"

@@ -11,14 +11,19 @@ conda activate geneval
 cd /home/hliu256/1d-tokenizer
 BASE=/data3/haoyuliu/geneval_eval
 SEEDS=${SEEDS:-"42 43 44"}
+ORDERS=${ORDERS:-"random prompt_sim prompt_sim_rev left_to_right right_to_left center_out"}
+MODELS=${MODELS:-"l xl"}
 
 echo "============================================"
-echo " GenEval Evaluation (seeds: $SEEDS)"
+echo " GenEval Evaluation"
+echo "   seeds:  $SEEDS"
+echo "   models: $MODELS"
+echo "   orders: $ORDERS"
 echo "============================================"
 
 for SEED in $SEEDS; do
-    for MODEL in l xl; do
-        for ORDER in random prompt_sim; do
+    for MODEL in $MODELS; do
+        for ORDER in $ORDERS; do
             DIR=$BASE/maskgen_kl_${MODEL}_${ORDER}_seed${SEED}
             RESULTS=$DIR/results.jsonl
             SUMMARY=$DIR/geneval_summary.json

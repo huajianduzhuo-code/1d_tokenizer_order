@@ -85,6 +85,54 @@ def mask_by_order(mask_len, order, bsz, seq_len):
     return masking
 
 
+# Static orders that depend only on the token index (1D position), not on
+# the prompt or on intermediate decoder outputs.
+STATIC_ORDER_TYPES = ("left_to_right", "right_to_left", "center_out")
+
+
+def make_static_order(order_type, bsz, seq_len, device="cuda"):
+    """Build a static order tensor of shape (bsz, seq_len) for `mask_by_order`.
+
+    Convention (matches `mask_by_order`): positions appearing at the START of
+    the order array stay masked the longest, i.e. are predicted LAST. So the
+    array stores the desired generation sequence in REVERSE.
+
+    Args:
+        order_type: one of STATIC_ORDER_TYPES.
+        bsz: batch size (the same permutation is broadcast to every sample).
+        seq_len: number of tokens.
+
+    Returns:
+        torch.LongTensor of shape (bsz, seq_len).
+    """
+    if order_type == "left_to_right":
+        # generation order: 0, 1, ..., L-1
+        predicted = np.arange(seq_len)
+    elif order_type == "right_to_left":
+        # generation order: L-1, L-2, ..., 0
+        predicted = np.arange(seq_len - 1, -1, -1)
+    elif order_type == "center_out":
+        # generation order: closest-to-center first, expanding outward.
+        # For even L, "center" sits between indices L//2-1 and L//2; we
+        # break ties by taking the right side (larger index) first so the
+        # ordering is deterministic and symmetric.
+        center = (seq_len - 1) / 2.0
+        indices = np.arange(seq_len)
+        distances = np.abs(indices - center)
+        # np.lexsort sorts by the LAST key first, so this sorts primarily
+        # by distance ascending, then by -index ascending (i.e. larger
+        # index first within a tie group).
+        predicted = np.lexsort((-indices, distances))
+    else:
+        raise ValueError(f"Unknown static order type: {order_type}")
+
+    # Reverse so that the FIRST entries of `order` are the LAST to be predicted.
+    order_np = predicted[::-1].copy()
+    order = torch.from_numpy(order_np).long().to(device)
+    print(order_type, order)
+    return order.unsqueeze(0).expand(bsz, -1).contiguous()
+
+
 class MaskGen_VQ(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "text-to-image-generation"], repo_url="https://github.com/bytedance/1d-tokenizer", license="apache-2.0"):
     def __init__(self, config):
         if isinstance(config, dict):
@@ -639,7 +687,11 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         return condition, condition_pooled
 
 
-    SUPPORTED_ORDER_TYPES = ["random", "prompt_sim", "prompt_sim_rev"]
+    SUPPORTED_ORDER_TYPES = [
+        "random",
+        "prompt_sim", "prompt_sim_rev",
+        "left_to_right", "right_to_left", "center_out",
+    ]
 
     def sample_tokens(self, bsz, clip_tokenizer, clip_encoder, num_iter=32,
                       cfg=3.0, cfg_schedule="linear", captions=[""],
@@ -655,6 +707,8 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
                   output has higher cosine similarity with the pooled text
                   embedding.
                 - "prompt_sim_rev": same but prioritize lower similarity first.
+                - "left_to_right" / "right_to_left" / "center_out": static
+                  spatial orders over the 1D token sequence (prompt-agnostic).
             record_snapshots: If True, return a list of intermediate token
                 snapshots (committed tokens only) at each step.
             record_full_snapshots: If True, return a list of "full prediction"
@@ -677,9 +731,11 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
         mask = torch.ones(bsz, self.seq_len).cuda()
         tokens = torch.zeros(bsz, self.seq_len, self.token_embed_dim).cuda()
 
-        # pre-compute random orders (only used for order_type="random")
+        # pre-compute static orders (random + the three deterministic 1D orders).
         if order_type == "random":
             orders = self.sample_orders(bsz)
+        elif order_type in STATIC_ORDER_TYPES:
+            orders = make_static_order(order_type, bsz, self.seq_len)
 
         condition, condition_pooled = open_clip_text_encoding(clip_tokenizer, clip_encoder, captions)
 
@@ -737,8 +793,8 @@ class MaskGen_KL(BaseModel, PyTorchModelHubMixin, tags=["arxiv:2501.07730", "tex
                                      torch.minimum(torch.sum(mask, dim=-1, keepdims=True) - 1, mask_len))
 
             # determine which tokens to predict this step
-            if order_type == "random":
-                # original: use pre-computed random order
+            if order_type == "random" or order_type in STATIC_ORDER_TYPES:
+                # use a pre-computed permutation (random or static spatial)
                 mask_next = mask_by_order(mask_len[0], orders, bsz, self.seq_len)
                 if step >= num_iter - 1:
                     mask_to_pred = mask.bool()

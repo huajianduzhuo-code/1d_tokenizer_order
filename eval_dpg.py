@@ -543,7 +543,11 @@ def _format_category_table(level, results, q_counts, p_counts,
 
 def _seeds_present():
     """Inspect on-disk dirs to find {(model, order): [seeds...]} present."""
-    pat = re.compile(r"^maskgen_kl_(l|xl)_(random|prompt_sim|prompt_sim_rev)_seed(\d+)$")
+    # Keep this list in sync with MaskGen_KL.SUPPORTED_ORDER_TYPES.
+    _orders = ["random", "prompt_sim", "prompt_sim_rev",
+               "left_to_right", "right_to_left", "center_out"]
+    order_alts = "|".join(re.escape(o) for o in _orders)
+    pat = re.compile(rf"^maskgen_kl_(l|xl)_({order_alts})_seed(\d+)$")
     found = {}
     if not os.path.isdir(OUTPUT_BASE):
         return found
@@ -558,13 +562,54 @@ def _seeds_present():
     return found
 
 
+_ALL_ORDERS = ["random", "prompt_sim", "prompt_sim_rev",
+               "left_to_right", "right_to_left", "center_out"]
+
+
+def _format_all_orders_overall(results):
+    """Compact table: overall score per (model, order), mean±std over seeds.
+
+    Useful for new orders (e.g. left_to_right) that the L1/L2 tables — which
+    are hard-coded to a random-vs-prompt_sim Δ — don't surface.
+    """
+    models = [m for m in ["l", "xl"] if m in results]
+    if not models:
+        return ""
+
+    orders_present = [o for o in _ALL_ORDERS
+                      if any(o in results[m] for m in models)]
+
+    col_w = 16
+    header = f"{'Order':<16}"
+    for m in models:
+        header += f" | {m.upper()+' overall':>{col_w}}"
+    lines = [
+        "=" * len(header),
+        "DPG-Bench Overall by Order  (mean±std across seeds)",
+        "=" * len(header),
+        header,
+        "-" * len(header),
+    ]
+    for order in orders_present:
+        row = f"{order:<16}"
+        for m in models:
+            seeds_list = results[m].get(order, [])
+            vals = [s.get("overall") for s in seeds_list]
+            mn, sd = _mean_std(vals)
+            cell = "--" if mn is None else f"{mn:>6.2f}±{sd:<5.2f} (n={len(vals)})"
+            row += f" | {cell:>{col_w}}"
+        lines.append(row)
+    lines.append("=" * len(header))
+    return "\n".join(lines)
+
+
 def run_summary():
     # results[model][order] = list of per-seed summary dicts (sorted by seed)
     results = {}
     seeds_map = _seeds_present()
     for model in ["l", "xl"]:
         model_res = {}
-        for order in ["random", "prompt_sim", "prompt_sim_rev"]:
+        for order in _ALL_ORDERS:
             seeds_list = []
             for seed in seeds_map.get((model, order), []):
                 summary_file = os.path.join(
@@ -585,7 +630,7 @@ def run_summary():
     # Print which seeds we found
     print("Seeds discovered per (model, order):")
     for model in ["l", "xl"]:
-        for order in ["random", "prompt_sim", "prompt_sim_rev"]:
+        for order in _ALL_ORDERS:
             seeds = sorted(s.get("seed", "?") for s in results.get(model, {}).get(order, []))
             if seeds:
                 print(f"  {model:>2} / {order:<14}: {seeds}")
@@ -597,8 +642,9 @@ def run_summary():
         "L1", results, l1_q, l1_p, total_q, total_p, "l1_categories")
     l2_table = _format_category_table(
         "L2", results, l2_q, l2_p, total_q, total_p, "l2_categories")
+    all_orders_table = _format_all_orders_overall(results)
 
-    body = l1_table + "\n\n" + l2_table
+    body = l1_table + "\n\n" + l2_table + "\n\n" + all_orders_table
     print(body)
 
     os.makedirs(OUTPUT_BASE, exist_ok=True)

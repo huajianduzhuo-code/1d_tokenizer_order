@@ -44,7 +44,14 @@ from PIL import Image
 from tqdm import tqdm
 import open_clip
 
-_SUPPORTED_ORDER_TYPES = ["random", "prompt_sim", "prompt_sim_rev"]
+# Source of truth lives in modeling.maskgen.MaskGen_KL.SUPPORTED_ORDER_TYPES.
+# Imported lazily inside main() to keep argparse --help cheap and to avoid
+# pulling torch/diffusers when the user only wants --summary.
+_SUPPORTED_ORDER_TYPES = [
+    "random",
+    "prompt_sim", "prompt_sim_rev",
+    "left_to_right", "right_to_left", "center_out",
+]
 
 
 # -----------------------------------------------------------------
@@ -342,7 +349,8 @@ def _save_parsed_results(results_file, model, order, seed):
 
 def _seeds_present():
     """Find {(model, order): [seeds present]} on disk."""
-    pat = re.compile(r"^maskgen_kl_(l|xl)_(random|prompt_sim|prompt_sim_rev)_seed(\d+)$")
+    order_alts = "|".join(re.escape(o) for o in _SUPPORTED_ORDER_TYPES)
+    pat = re.compile(rf"^maskgen_kl_(l|xl)_({order_alts})_seed(\d+)$")
     found = {}
     if not os.path.isdir(OUTPUT_BASE):
         return found
@@ -432,7 +440,7 @@ def run_summary():
 
     lines.append("-" * len(header))
 
-    order_rank = {"random": 0, "prompt_sim": 1, "prompt_sim_rev": 2}
+    order_rank = {o: i for i, o in enumerate(_SUPPORTED_ORDER_TYPES)}
     for (model, order) in sorted(all_results, key=lambda k: (k[0], order_rank.get(k[1], 99))):
         summaries = all_results[(model, order)]
         n = len(summaries)

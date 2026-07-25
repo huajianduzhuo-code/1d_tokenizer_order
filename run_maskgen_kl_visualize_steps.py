@@ -18,6 +18,8 @@ import numpy as np
 import torch
 from datetime import datetime
 import matplotlib.pyplot as plt
+plt.rcParams["font.family"] = "Liberation Serif"
+plt.rcParams["font.weight"] = "normal"
 import open_clip
 from modeling.tatitok import TATiTok
 from modeling.maskgen import MaskGen_KL
@@ -40,33 +42,39 @@ COMPARISON_PROMPTS = [
     # # Counting + distinct objects — ordering of semantically similar items
     # "Three red apples and two green pears on a wooden table.",
     # # Foreground subject vs complex background
-    # "A red umbrella on a rainy city street at night.",
+    # # "A red umbrella on a rainy city street at night.",
     # # Unusual composition — tests semantic understanding
     # "An astronaut riding a horse on the surface of the moon.",
     # # Fine-grained detail + hierarchy — cake vs candles vs background
     # "A birthday cake with colorful candles on a kitchen counter.",
     # # Multiple interacting subjects — who comes first?
-    # "A child feeding a deer in a snowy forest.",
+    # # "A child feeding a deer in a snowy forest.",
 
     # ── GenEval benchmark prompts ───────────────────────────────────────
     # single_object: baseline — single entity, no composition
-    "a photo of a bicycle",
-    "a photo of a dog",
-    # two_object: two semantically distinct objects — which gets generated first?
-    "a photo of a scissors and a bird",
-    "a photo of a surfboard and a suitcase",
-    # counting: multiple identical objects — ordering among similar items
-    "a photo of three sports balls",
-    "a photo of four vases",
-    # colors: single object with a color attribute — attribute binding
-    "a photo of a purple elephant",
-    "a photo of a pink car",
+    # "a photo of a bicycle",
+    # "a photo of a dog",
+    # # two_object: two semantically distinct objects — which gets generated first?
+    # "a photo of a scissors and a bird",
+    # "a photo of a surfboard and a suitcase",
+    # # counting: multiple identical objects — ordering among similar items
+    # "a photo of three sports balls",
+    # "a photo of four vases",
+    # # colors: single object with a color attribute — attribute binding
+    # "a photo of a purple elephant",
+    # "a photo of a pink car",
     # color_attr: two objects each with a distinct color — tests color-object binding
-    "a photo of a yellow parking meter and a pink refrigerator",
-    "a photo of a red laptop and a brown car",
-    # position: spatial relationship between two objects — tests spatial reasoning
-    "a photo of a zebra left of an elephant",
-    "a photo of a vase above a fire hydrant",
+    "a photo of a yellow parking meter and a pink car",
+    "a photo of a yellow parking meter and a pink car",
+    "a photo of a yellow parking meter and a pink car",
+    "a photo of a yellow parking meter and a pink car",
+    "a photo of a yellow parking meter and a pink car",
+    "a photo of a yellow parking meter and a pink car",
+    "a photo of a yellow parking meter and a pink car",
+    # "a photo of a red laptop and a brown car",
+    # # position: spatial relationship between two objects — tests spatial reasoning
+    # "a photo of a zebra left of an elephant",
+    # "a photo of a vase above a fire hydrant",
 ]
 
 
@@ -129,13 +137,13 @@ def visualize_single(snapshot_images, prompt, order_type, out_path):
         ax = axes[r, c]
         if idx < num_steps:
             ax.imshow(snapshot_images[idx])
-            ax.set_title(f"step {idx + 1}", fontsize=10)
+            ax.set_title(f"step {idx + 1}", fontsize=28)
         ax.set_xticks([])
         ax.set_yticks([])
         if idx >= num_steps:
             ax.axis("off")
 
-    fig.suptitle(f'"{prompt}"  (order={order_type})', fontsize=14)
+    fig.suptitle(f'"{prompt}"  (order={order_type})', fontsize=40)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -161,20 +169,20 @@ def visualize_comparison(random_images, sim_images, prompt, num_iter, out_path):
     for col, step_idx in enumerate(step_indices):
         # Top row: random
         axes[0, col].imshow(random_images[step_idx])
-        axes[0, col].set_title(f"step {step_idx + 1}", fontsize=9)
+        axes[0, col].set_title(f"step {step_idx + 1}", fontsize=35)
         axes[0, col].set_xticks([])
         axes[0, col].set_yticks([])
 
         # Bottom row: prompt_sim
         axes[1, col].imshow(sim_images[step_idx])
-        axes[1, col].set_title(f"step {step_idx + 1}", fontsize=9)
+        # axes[1, col].set_title(f"step {step_idx + 1}", fontsize=13)
         axes[1, col].set_xticks([])
         axes[1, col].set_yticks([])
 
-    axes[0, 0].set_ylabel("random", fontsize=12, fontweight="bold")
-    axes[1, 0].set_ylabel("prompt_sim", fontsize=12, fontweight="bold")
+    axes[0, 0].set_ylabel("random", fontsize=35)
+    axes[1, 0].set_ylabel("SAR", fontsize=35)
 
-    fig.suptitle(f'"{prompt}"', fontsize=13)
+    fig.suptitle(f'Prompt: "{prompt}"', fontsize=40)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -255,10 +263,12 @@ def main():
             results[order_type] = all_step_images
 
         # Save per-prompt comparison figures
+        idx_width = len(str(len(prompts) - 1)) if len(prompts) > 1 else 1
         for p_idx, prompt in enumerate(prompts):
             random_imgs = [step_batch[p_idx] for step_batch in results["random"]]
             sim_imgs = [step_batch[p_idx] for step_batch in results["prompt_sim"]]
             prompt_slug = prompt.lower().replace(" ", "_").replace(".", "").replace(",", "")[:50]
+            prompt_slug = f"{p_idx:0{idx_width}d}_{prompt_slug}"
 
             # Comparison figure
             cmp_path = f"{run_dir}/compare_{prompt_slug}.png"

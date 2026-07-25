@@ -1,0 +1,45 @@
+Top 40 prompts where random > prompt_sim on XL (strong dataset)
+Aggregated over 3 seeds × 4 samples × 2 providers (24 obs per question).
+
+rank   prompt_id                         r_acc  p_acc   delta  prompt
+----------------------------------------------------------------------------------------------------------------------------------
+1      pbhs-composition_layout-056       0.833  0.417  +0.417  A single book between two stacks of books on a study desk.
+2      pbhs-composition_layout-027       0.667  0.292  +0.375  A mug placed to the right of a kettle on a kitchen counter.
+3      pbhs-counting_hard-029            0.750  0.417  +0.333  Three red apples placed in a row on a clean white plate.
+4      pbhs-counting_hard-023            0.833  0.542  +0.292  Three identical white vases placed on a long shelf.
+5      pbhs-count_x_color-068            0.354  0.104  +0.250  Five yellow buttons and two black buttons sewn on a piece of
+6      pbhs-composition_layout-004       0.708  0.500  +0.208  A beach umbrella to the left of a beach chair on the sand.
+7      pbhs-composition_layout-019       0.479  0.271  +0.208  A red tulip to the right of a yellow tulip in a flower bed.
+8      pbhs-count_x_color-063            0.438  0.229  +0.208  Two blue boats and three white boats on a calm blue lake.
+9      pbhs-count_x_color-018            0.521  0.333  +0.188  Four green pears and one red apple in a wicker basket.
+10     pbhs-composition_layout-001       0.479  0.292  +0.188  A red bowl to the left of a blue bowl on a kitchen counter.
+11     pbhs-composition_layout-006       0.708  0.542  +0.167  A tall building between two short buildings in a city skylin
+12     pbhs-counting_hard-003            0.646  0.479  +0.167  Five paper lanterns hanging in a row from a wooden beam.
+13     pbhs-counting_hard-012            0.417  0.250  +0.167  Five paint cans lined up on a workshop floor.
+14     pbhs-composition_layout-022       0.417  0.250  +0.167  A vase of flowers between two framed pictures on a long wood
+15     pbhs-composition_layout-059       0.500  0.333  +0.167  A girl standing to the right of a boy in a small classroom.
+16     pbhs-composition_layout-066       0.500  0.333  +0.167  A piano to the left of a harp on a concert stage.
+17     pbhs-counting_hard-065            0.375  0.208  +0.167  Four ducks and one swan in a small pond.
+18     pbhs-count_x_color-062            0.229  0.062  +0.167  Four red bell peppers and one yellow bell pepper in a wicker
+19     pbhs-composition_layout-042       0.667  0.500  +0.167  A pumpkin placed to the right of a haystack in an autumn fie
+20     pbhs-composition_layout-021       0.583  0.438  +0.146  A pizza placed between two glasses of soda on a wooden table
+21     pbhs-count_x_color-022            0.542  0.396  +0.146  Four pink macarons and one green macaron on a small plate.
+22     pbhs-counting_hard-022            0.583  0.458  +0.125  Four mugs hanging from hooks under a kitchen cabinet.
+23     pbhs-counting_hard-052            0.417  0.292  +0.125  Three carrots and two potatoes laid out on a wooden cutting 
+24     pbhs-counting_hard-054            0.250  0.125  +0.125  Two surfboards and three towels arranged on a sandy beach.
+25     pbhs-count_x_color-013            0.417  0.292  +0.125  Three white tulips and two purple tulips in a tall vase.
+26     pbhs-count_x_color-021            0.250  0.125  +0.125  Three orange goldfish and two black goldfish swimming in a s
+27     pbhs-count_x_color-059            0.188  0.062  +0.125  Two red M&Ms and three green M&Ms scattered on a small sauce
+28     pbhs-count_x_color-070            0.250  0.125  +0.125  Four pink ribbons and one blue ribbon tied around a single g
+29     pbhs-composition_layout-012       0.167  0.042  +0.125  A pencil lying between two erasers on a wooden desk.
+30     pbhs-composition_layout-020       0.438  0.312  +0.125  A lighthouse on the left and a sailboat on the right of a be
+31     pbhs-composition_layout-031       0.167  0.042  +0.125  A bicycle parked to the right of a scooter on a brick sidewa
+32     pbhs-composition_layout-037       0.708  0.583  +0.125  A piggy bank between two stacks of coins on a wooden shelf.
+33     pbhs-composition_layout-045       0.208  0.083  +0.125  A clock placed between two photographs on a plain wall.
+34     pbhs-counting_hard-042            0.354  0.250  +0.104  Two boots and three sneakers lined up on a shoe rack.
+35     pbhs-count_x_color-069            0.417  0.312  +0.104  Three orange goldfish and two white goldfish in a clear fish
+36     pbhs-counting_hard-058            0.188  0.083  +0.104  Two saxophones and three trumpets displayed in a music store
+37     pbhs-counting_hard-061            0.333  0.229  +0.104  Four bottles and one jar lined up on a kitchen counter.
+38     pbhs-count_x_color-029            0.229  0.125  +0.104  Three red socks and two blue socks pinned on a clothesline.
+39     pbhs-composition_layout-049       0.312  0.208  +0.104  A red ball to the right of a blue ball on a wooden floor.
+40     pbhs-composition_layout-003       0.625  0.521  +0.104  A book placed between two bookends on a wooden shelf.
